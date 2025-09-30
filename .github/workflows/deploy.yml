@@ -1,0 +1,50 @@
+name: Deploy Mentor Bot
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      # Копируем код на сервер (кроме .git)
+      - name: Upload files to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: |
+            bot.py
+            storage.py
+            scheduler.py
+            keyboards.py
+            requirements.txt
+            # если у тебя есть папка data/ (но без .db), добавь:
+            data/
+            # если в репозитории есть unit-файл:
+            etc/systemd/system/mentor-bot.service
+          target: ${{ secrets.DEPLOY_PATH }}
+          overwrite: true
+          strip_components: 0
+
+      # Выполняем команды на сервере: обновляем зависимости и рестартуем сервис
+      - name: Install deps & restart service
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd ${{ secrets.DEPLOY_PATH }}
+            if [ ! -d venv ]; then python3 -m venv venv; fi
+            ./venv/bin/pip install -U pip
+            if [ -f requirements.txt ]; then ./venv/bin/pip install -r requirements.txt; fi
+            sudo systemctl daemon-reload || true
+            sudo systemctl restart mentor-bot

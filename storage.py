@@ -19,14 +19,16 @@ class Reminder:
     text: str
     event_ts_utc: datetime
     created_utc: datetime
-    archived: int
+    archived: bool
+
 
 @dataclass(slots=True)
 class Alert:
     id: int
     reminder_id: int
     fire_ts_utc: datetime
-    fired: int
+    fired: bool
+
 
 @dataclass(slots=True)
 class Task:
@@ -35,7 +37,8 @@ class Task:
     user_id: int
     text: str
     created_utc: datetime
-    archived: int
+    archived: bool
+
 
 @dataclass(slots=True)
 class ShoppingItem:
@@ -44,7 +47,8 @@ class ShoppingItem:
     user_id: int
     text: str
     created_utc: datetime
-    archived: int
+    archived: bool
+
 
 @dataclass(slots=True)
 class Ritual:
@@ -56,62 +60,94 @@ class Ritual:
 
 
 class DBManager:
-    def __init__(self, db_path: Path):
-        self.db_path = str(db_path)
+    def __init__(self, db_path: Path) -> None:
+        self._db_path = Path(db_path)
+
+    @property
+    def db_path(self) -> Path:
+        return self._db_path
 
     async def init(self) -> None:
-        async with aiosqlite.connect(self.db_path) as db:
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        async with aiosqlite.connect(self._db_path) as db:
             await db.executescript(
                 """
                 PRAGMA journal_mode=WAL;
-                CREATE TABLE IF NOT EXISTS reminders(
+
+                CREATE TABLE IF NOT EXISTS reminders (
                     id INTEGER PRIMARY KEY,
-                    chat_id INTEGER,
-                    user_id INTEGER,
-                    text TEXT,
-                    event_ts_utc TEXT,
-                    created_utc TEXT,
-                    archived INTEGER DEFAULT 0
-                );
-                CREATE TABLE IF NOT EXISTS alerts(
-                    id INTEGER PRIMARY KEY,
-                    reminder_id INTEGER REFERENCES reminders(id) ON DELETE CASCADE,
-                    fire_ts_utc TEXT,
-                    fired INTEGER DEFAULT 0
+                    chat_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    event_ts_utc TEXT NOT NULL,
+                    created_utc TEXT NOT NULL,
+                    archived INTEGER NOT NULL DEFAULT 0
                 );
 
-                CREATE TABLE IF NOT EXISTS tasks(
+                CREATE TABLE IF NOT EXISTS alerts (
                     id INTEGER PRIMARY KEY,
-                    chat_id INTEGER,
-                    user_id INTEGER,
-                    text TEXT,
-                    created_utc TEXT,
-                    archived INTEGER DEFAULT 0
+                    reminder_id INTEGER NOT NULL REFERENCES reminders(id) ON DELETE CASCADE,
+                    fire_ts_utc TEXT NOT NULL,
+                    fired INTEGER NOT NULL DEFAULT 0
                 );
 
-                CREATE TABLE IF NOT EXISTS shopping(
+                CREATE TABLE IF NOT EXISTS tasks (
                     id INTEGER PRIMARY KEY,
-                    chat_id INTEGER,
-                    user_id INTEGER,
-                    text TEXT,
-                    created_utc TEXT,
-                    archived INTEGER DEFAULT 0
+                    chat_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    created_utc TEXT NOT NULL,
+                    archived INTEGER NOT NULL DEFAULT 0
                 );
 
-                CREATE TABLE IF NOT EXISTS rituals(
+                CREATE TABLE IF NOT EXISTS shopping (
                     id INTEGER PRIMARY KEY,
-                    chat_id INTEGER,
-                    user_id INTEGER,
-                    text TEXT,
-                    created_utc TEXT
+                    chat_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    created_utc TEXT NOT NULL,
+                    archived INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS rituals (
+                    id INTEGER PRIMARY KEY,
+                    chat_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    created_utc TEXT NOT NULL
                 );
                 """
             )
             await db.commit()
 
-    # -------- reminders
+    # --- helpers -----------------------------------------------------------------
+
+    @staticmethod
+    def _row_to_reminder(row: aiosqlite.Row) -> Reminder:
+        return Reminder(
+            id=row["id"],
+            chat_id=row["chat_id"],
+            user_id=row["user_id"],
+            text=row["text"],
+            event_ts_utc=datetime.fromisoformat(row["event_ts_utc"]).replace(tzinfo=UTC),
+            created_utc=datetime.fromisoformat(row["created_utc"]).replace(tzinfo=UTC),
+            archived=bool(row["archived"]),
+        )
+
+    @staticmethod
+    def _row_to_alert(row: aiosqlite.Row) -> Alert:
+        return Alert(
+            id=row["id"],
+            reminder_id=row["reminder_id"],
+            fire_ts_utc=datetime.fromisoformat(row["fire_ts_utc"]).replace(tzinfo=UTC),
+            fired=bool(row["fired"]),
+        )
+
+    # --- reminders ----------------------------------------------------------------
+
     async def create_reminder(
         self,
+        *,
         chat_id: int,
         user_id: int,
         text: str,
@@ -119,11 +155,12 @@ class DBManager:
         created_utc: datetime,
         alert_times_utc: Sequence[datetime],
     ) -> Tuple[Reminder, List[Alert]]:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute("PRAGMA foreign_keys = ON")
             cur = await db.execute(
                 """
-                INSERT INTO reminders(chat_id,user_id,text,event_ts_utc,created_utc)
-                VALUES(?,?,?,?,?)
+                INSERT INTO reminders (chat_id, user_id, text, event_ts_utc, created_utc)
+                VALUES (?, ?, ?, ?, ?)
                 """,
                 (chat_id, user_id, text, event_ts_utc.isoformat(), created_utc.isoformat()),
             )
@@ -131,365 +168,385 @@ class DBManager:
             await cur.close()
 
             alerts: List[Alert] = []
-            for t in alert_times_utc:
-                c = await db.execute(
-                    "INSERT INTO alerts(reminder_id, fire_ts_utc) VALUES(?,?)",
-                    (reminder_id, t.isoformat()),
+            for fire_ts in alert_times_utc:
+                alert_cur = await db.execute(
+                    "INSERT INTO alerts (reminder_id, fire_ts_utc) VALUES (?, ?)",
+                    (reminder_id, fire_ts.isoformat()),
                 )
                 alerts.append(
-                    Alert(id=c.lastrowid, reminder_id=reminder_id, fire_ts_utc=t, fired=0)
+                    Alert(
+                        id=alert_cur.lastrowid,
+                        reminder_id=reminder_id,
+                        fire_ts_utc=fire_ts,
+                        fired=False,
+                    )
                 )
-                await c.close()
+                await alert_cur.close()
 
             await db.commit()
 
-            r = Reminder(
-                id=reminder_id,
-                chat_id=chat_id,
-                user_id=user_id,
-                text=text,
-                event_ts_utc=event_ts_utc,
-                created_utc=created_utc,
-                archived=0,
-            )
-            return r, alerts
+        reminder = Reminder(
+            id=reminder_id,
+            chat_id=chat_id,
+            user_id=user_id,
+            text=text,
+            event_ts_utc=event_ts_utc,
+            created_utc=created_utc,
+            archived=False,
+        )
+        return reminder, alerts
+
+    async def get_reminder(self, reminder_id: int) -> Optional[Reminder]:
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM reminders WHERE id = ?",
+                (reminder_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+        if not row:
+            return None
+        return self._row_to_reminder(row)
 
     async def get_reminders_for_range(
         self,
+        *,
         chat_id: int,
         user_id: int,
         start_utc: Optional[datetime],
         end_utc: Optional[datetime],
         archived: bool,
     ) -> List[Reminder]:
-        q = "SELECT id, chat_id, user_id, text, event_ts_utc, created_utc, archived FROM reminders WHERE chat_id=? AND user_id=? AND archived=?"
-        params: list = [chat_id, user_id, 1 if archived else 0]
+        clauses = ["chat_id = ?", "user_id = ?", "archived = ?"]
+        params: List[object] = [chat_id, user_id, 1 if archived else 0]
         if start_utc is not None:
-            q += " AND event_ts_utc >= ?"
+            clauses.append("event_ts_utc >= ?")
             params.append(start_utc.isoformat())
         if end_utc is not None:
-            q += " AND event_ts_utc < ?"
+            clauses.append("event_ts_utc < ?")
             params.append(end_utc.isoformat())
-        q += " ORDER BY event_ts_utc ASC"
+        where = " AND ".join(clauses)
 
-        out: List[Reminder] = []
-        async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute(q, params) as cur:
-                async for row in cur:
-                    out.append(
-                        Reminder(
-                            id=row[0],
-                            chat_id=row[1],
-                            user_id=row[2],
-                            text=row[3],
-                            event_ts_utc=datetime.fromisoformat(row[4]).replace(tzinfo=UTC),
-                            created_utc=datetime.fromisoformat(row[5]).replace(tzinfo=UTC),
-                            archived=row[6],
-                        )
-                    )
-        return out
-    async def get_pending_alerts(self, now_utc: datetime) -> list[Alert]:
-        """
-        Вернёт все НЕотправленные алерты (alerts.fired=0), которые ещё впереди (ts_utc > now_utc).
-        """
-        assert self._db is not None
-        rows = await self._db.execute_fetchall(
-            """
-            SELECT a.id, a.reminder_id, a.ts_utc, a.fired
-            FROM alerts a
-            JOIN reminders r ON r.id = a.reminder_id
-            WHERE a.fired = 0
-              AND a.ts_utc > ?
-            ORDER BY a.ts_utc ASC
-            """,
-            (now_utc.isoformat(),),
-        )
-        result: list[Alert] = []
-        for row in rows:
-            result.append(
-                Alert(
-                    id=row["id"],
-                    reminder_id=row["reminder_id"],
-                    ts_utc=datetime.fromisoformat(row["ts_utc"]).replace(tzinfo=UTC),
-                    fired=bool(row["fired"]),
-                )
-            )
-        return result
-
-    async def get_tasks(self, chat_id: int, user_id: int, limit: int = 50) -> list[dict]:
-        assert self._db is not None
-        rows = await self._db.execute_fetchall(
-            """
-            SELECT id, text, created_utc, archived
-            FROM tasks
-            WHERE chat_id = ? AND user_id = ? AND archived = 0
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (chat_id, user_id, limit),
-        )
-        return [dict(row) for row in rows]
-
-    async def get_shopping_list(self, chat_id: int, user_id: int, limit: int = 100) -> list[dict]:
-        assert self._db is not None
-        rows = await self._db.execute_fetchall(
-            """
-            SELECT id, text, created_utc, archived
-            FROM shopping
-            WHERE chat_id = ? AND user_id = ? AND archived = 0
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (chat_id, user_id, limit),
-        )
-        return [dict(row) for row in rows]
-
-    async def archive_shopping_item(self, item_id: int) -> None:
-        assert self._db is not None
-        await self._db.execute(
-            "UPDATE shopping SET archived = 1 WHERE id = ?",
-            (item_id,),
-        )
-        await self._db.commit()
-
-    async def get_rituals(self, chat_id: int, user_id: int, limit: int = 50) -> list[dict]:
-        assert self._db is not None
-        rows = await self._db.execute_fetchall(
-            """
-            SELECT id, text, created_utc
-            FROM rituals
-            WHERE chat_id = ? AND user_id = ?
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (chat_id, user_id, limit),
-        )
-        return [dict(row) for row in rows]
-
-    async def get_reminder(self, reminder_id: int) -> Optional[Reminder]:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT id, chat_id, user_id, text, event_ts_utc, created_utc, archived FROM reminders WHERE id=?",
-                (reminder_id,),
-            ) as cur:
-                row = await cur.fetchone()
-                if not row:
-                    return None
-                return Reminder(
-                    id=row[0],
-                    chat_id=row[1],
-                    user_id=row[2],
-                    text=row[3],
-                    event_ts_utc=datetime.fromisoformat(row[4]).replace(tzinfo=UTC),
-                    created_utc=datetime.fromisoformat(row[5]).replace(tzinfo=UTC),
-                    archived=row[6],
-                )
+                f"SELECT * FROM reminders WHERE {where} ORDER BY event_ts_utc",
+                params,
+            ) as cursor:
+                rows = await cursor.fetchall()
+        return [self._row_to_reminder(row) for row in rows]
 
     async def archive_reminder(self, reminder_id: int) -> None:
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("UPDATE reminders SET archived=1 WHERE id=?", (reminder_id,))
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                "UPDATE reminders SET archived = 1 WHERE id = ?",
+                (reminder_id,),
+            )
             await db.commit()
 
-    async def add_alerts(self, reminder_id: int, when_list_utc: Sequence[datetime]) -> List[Alert]:
+    async def delete_reminder(self, reminder_id: int) -> None:
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute("PRAGMA foreign_keys = ON")
+            await db.execute("DELETE FROM reminders WHERE id = ?", (reminder_id,))
+            await db.commit()
+
+    async def add_alerts(self, reminder_id: int, fire_times: Sequence[datetime]) -> List[Alert]:
         alerts: List[Alert] = []
-        async with aiosqlite.connect(self.db_path) as db:
-            for t in when_list_utc:
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute("PRAGMA foreign_keys = ON")
+            for fire_ts in fire_times:
                 cur = await db.execute(
-                    "INSERT INTO alerts(reminder_id, fire_ts_utc) VALUES(?,?)",
-                    (reminder_id, t.isoformat()),
+                    "INSERT INTO alerts (reminder_id, fire_ts_utc) VALUES (?, ?)",
+                    (reminder_id, fire_ts.isoformat()),
                 )
-                alerts.append(Alert(id=cur.lastrowid, reminder_id=reminder_id, fire_ts_utc=t, fired=0))
+                alerts.append(
+                    Alert(
+                        id=cur.lastrowid,
+                        reminder_id=reminder_id,
+                        fire_ts_utc=fire_ts,
+                        fired=False,
+                    )
+                )
                 await cur.close()
             await db.commit()
         return alerts
 
-    async def due_alerts(self, now_utc: datetime) -> List[Alert]:
-        res: List[Alert] = []
-        async with aiosqlite.connect(self.db_path) as db:
+    async def get_alert_with_reminder(self, alert_id: int) -> Optional[Tuple[Alert, Reminder]]:
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT id, reminder_id, fire_ts_utc, fired FROM alerts WHERE fired=0 AND fire_ts_utc <= ?",
+                """
+                SELECT a.id as a_id, a.reminder_id, a.fire_ts_utc, a.fired,
+                       r.id as r_id, r.chat_id, r.user_id, r.text, r.event_ts_utc, r.created_utc, r.archived
+                FROM alerts a
+                JOIN reminders r ON r.id = a.reminder_id
+                WHERE a.id = ?
+                """,
+                (alert_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+        if not row:
+            return None
+        alert = Alert(
+            id=row["a_id"],
+            reminder_id=row["reminder_id"],
+            fire_ts_utc=datetime.fromisoformat(row["fire_ts_utc"]).replace(tzinfo=UTC),
+            fired=bool(row["fired"]),
+        )
+        reminder = Reminder(
+            id=row["r_id"],
+            chat_id=row["chat_id"],
+            user_id=row["user_id"],
+            text=row["text"],
+            event_ts_utc=datetime.fromisoformat(row["event_ts_utc"]).replace(tzinfo=UTC),
+            created_utc=datetime.fromisoformat(row["created_utc"]).replace(tzinfo=UTC),
+            archived=bool(row["archived"]),
+        )
+        return alert, reminder
+
+    async def get_pending_alerts(self, now_utc: datetime) -> List[Tuple[Alert, Reminder]]:
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT a.id as a_id, a.reminder_id, a.fire_ts_utc, a.fired,
+                       r.id as r_id, r.chat_id, r.user_id, r.text, r.event_ts_utc, r.created_utc, r.archived
+                FROM alerts a
+                JOIN reminders r ON r.id = a.reminder_id
+                WHERE a.fired = 0 AND datetime(a.fire_ts_utc) > ?
+                ORDER BY a.fire_ts_utc ASC
+                """,
                 (now_utc.isoformat(),),
-            ) as cur:
-                async for row in cur:
-                    res.append(Alert(id=row[0], reminder_id=row[1], fire_ts_utc=datetime.fromisoformat(row[2]).replace(tzinfo=UTC), fired=row[3]))
-        return res
+            ) as cursor:
+                rows = await cursor.fetchall()
+        result: List[Tuple[Alert, Reminder]] = []
+        for row in rows:
+            alert = Alert(
+                id=row["a_id"],
+                reminder_id=row["reminder_id"],
+                fire_ts_utc=datetime.fromisoformat(row["fire_ts_utc"]).replace(tzinfo=UTC),
+                fired=False,
+            )
+            reminder = Reminder(
+                id=row["r_id"],
+                chat_id=row["chat_id"],
+                user_id=row["user_id"],
+                text=row["text"],
+                event_ts_utc=datetime.fromisoformat(row["event_ts_utc"]).replace(tzinfo=UTC),
+                created_utc=datetime.fromisoformat(row["created_utc"]).replace(tzinfo=UTC),
+                archived=bool(row["archived"]),
+            )
+            result.append((alert, reminder))
+        return result
+
+    async def get_active_alerts_for_reminder(self, reminder_id: int) -> List[Alert]:
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM alerts WHERE reminder_id = ? AND fired = 0",
+                (reminder_id,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        return [self._row_to_alert(row) for row in rows]
 
     async def mark_alert_fired(self, alert_id: int) -> None:
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("UPDATE alerts SET fired=1 WHERE id=?", (alert_id,))
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                "UPDATE alerts SET fired = 1 WHERE id = ?",
+                (alert_id,),
+            )
             await db.commit()
 
-    # -------- tasks
-    async def create_task(self, chat_id: int, user_id: int, text: str, created_utc: datetime) -> None:
-        assert self._db is not None
-        await self._db.execute(
-            """
-            INSERT INTO tasks(chat_id, user_id, text, created_utc, archived)
-            VALUES (?, ?, ?, ?, 0)
-            """,
-            (chat_id, user_id, text, created_utc.isoformat()),
-        )
-        await self._db.commit()
+    async def mark_alerts_fired_for_reminder(self, reminder_id: int) -> None:
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                "UPDATE alerts SET fired = 1 WHERE reminder_id = ?",
+                (reminder_id,),
+            )
+            await db.commit()
 
-    async def get_tasks(self, chat_id: int, user_id: int, limit: int = 100) -> list[dict]:
-        assert self._db is not None
-        rows = await self._db.execute_fetchall(
-            """
-            SELECT id, text, created_utc
-            FROM tasks
-            WHERE chat_id=? AND user_id=? AND archived=0
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (chat_id, user_id, limit),
-        )
-        return [{"id": r["id"], "text": r["text"], "created_utc": r["created_utc"]} for r in rows]
+    # --- tasks --------------------------------------------------------------------
 
-    async def list_tasks(self, chat_id: int, user_id: int, archived: bool) -> List[Task]:
-        out: List[Task] = []
-        async with aiosqlite.connect(self.db_path) as db:
+    async def create_task(
+        self, *, chat_id: int, user_id: int, text: str, created_utc: datetime
+    ) -> Task:
+        async with aiosqlite.connect(self._db_path) as db:
+            cur = await db.execute(
+                """
+                INSERT INTO tasks (chat_id, user_id, text, created_utc)
+                VALUES (?, ?, ?, ?)
+                """,
+                (chat_id, user_id, text, created_utc.isoformat()),
+            )
+            await db.commit()
+            task_id = cur.lastrowid
+            await cur.close()
+        return Task(
+            id=task_id,
+            chat_id=chat_id,
+            user_id=user_id,
+            text=text,
+            created_utc=created_utc,
+            archived=False,
+        )
+
+    async def list_tasks(self, *, chat_id: int, user_id: int, archived: bool) -> List[Task]:
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT id, chat_id, user_id, text, created_utc, archived FROM tasks WHERE chat_id=? AND user_id=? AND archived=? ORDER BY id DESC",
+                """
+                SELECT * FROM tasks
+                WHERE chat_id = ? AND user_id = ? AND archived = ?
+                ORDER BY id DESC
+                """,
                 (chat_id, user_id, 1 if archived else 0),
-            ) as cur:
-                async for row in cur:
-                    out.append(
-                        Task(
-                            id=row[0],
-                            chat_id=row[1],
-                            user_id=row[2],
-                            text=row[3],
-                            created_utc=datetime.fromisoformat(row[4]).replace(tzinfo=UTC),
-                            archived=row[5],
-                        )
-                    )
-        return out
+            ) as cursor:
+                rows = await cursor.fetchall()
+        tasks: List[Task] = []
+        for row in rows:
+            tasks.append(
+                Task(
+                    id=row["id"],
+                    chat_id=row["chat_id"],
+                    user_id=row["user_id"],
+                    text=row["text"],
+                    created_utc=datetime.fromisoformat(row["created_utc"]).replace(tzinfo=UTC),
+                    archived=bool(row["archived"]),
+                )
+            )
+        return tasks
 
     async def archive_task(self, task_id: int) -> None:
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("UPDATE tasks SET archived=1 WHERE id=?", (task_id,))
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute("UPDATE tasks SET archived = 1 WHERE id = ?", (task_id,))
             await db.commit()
 
     async def delete_task(self, task_id: int) -> None:
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
             await db.commit()
 
-    # -------- shopping
-    async def create_shopping_item(self, chat_id: int, user_id: int, text: str, created_utc: datetime) -> None:
-        assert self._db is not None
-        await self._db.execute(
-            """
-            INSERT INTO shopping(chat_id, user_id, text, created_utc, archived, bought)
-            VALUES (?, ?, ?, ?, 0, 0)
-            """,
-            (chat_id, user_id, text, created_utc.isoformat()),
-        )
-        await self._db.commit()
+    # --- shopping -----------------------------------------------------------------
 
-    async def get_shopping_items(self, chat_id: int, user_id: int, include_bought: bool = False) -> list[dict]:
-        assert self._db is not None
-        if include_bought:
-            rows = await self._db.execute_fetchall(
-                """
-                SELECT id, text, created_utc, bought
-                FROM shopping
-                WHERE chat_id=? AND user_id=? AND archived=0
-                ORDER BY id DESC
-                """,
-                (chat_id, user_id),
-            )
-        else:
-            rows = await self._db.execute_fetchall(
-                """
-                SELECT id, text, created_utc, bought
-                FROM shopping
-                WHERE chat_id=? AND user_id=? AND archived=0 AND bought=0
-                ORDER BY id DESC
-                """,
-                (chat_id, user_id),
-            )
-        return [{"id": r["id"], "text": r["text"], "created_utc": r["created_utc"], "bought": r["bought"]} for r in rows]
-
-    async def mark_shopping_bought(self, item_id: int) -> None:
-        assert self._db is not None
-        await self._db.execute("UPDATE shopping SET bought=1 WHERE id=?", (item_id,))
-        await self._db.commit()
-
-    async def delete_shopping_item(self, item_id: int) -> None:
-        assert self._db is not None
-        await self._db.execute("UPDATE shopping SET archived=1 WHERE id=?", (item_id,))
-        await self._db.commit()
-
-    async def create_shopping_item(self, chat_id: int, user_id: int, text: str, created_utc: datetime) -> ShoppingItem:
-        async with aiosqlite.connect(self.db_path) as db:
+    async def create_shopping_item(
+        self, *, chat_id: int, user_id: int, text: str, created_utc: datetime
+    ) -> ShoppingItem:
+        async with aiosqlite.connect(self._db_path) as db:
             cur = await db.execute(
-                "INSERT INTO shopping(chat_id,user_id,text,created_utc) VALUES(?,?,?,?)",
+                """
+                INSERT INTO shopping (chat_id, user_id, text, created_utc)
+                VALUES (?, ?, ?, ?)
+                """,
                 (chat_id, user_id, text, created_utc.isoformat()),
             )
+            await db.commit()
             item_id = cur.lastrowid
             await cur.close()
-            await db.commit()
-        return ShoppingItem(id=item_id, chat_id=chat_id, user_id=user_id, text=text, created_utc=created_utc, archived=0)
+        return ShoppingItem(
+            id=item_id,
+            chat_id=chat_id,
+            user_id=user_id,
+            text=text,
+            created_utc=created_utc,
+            archived=False,
+        )
 
-    async def list_shopping(self, chat_id: int, user_id: int, archived: bool) -> List[ShoppingItem]:
-        out: List[ShoppingItem] = []
-        async with aiosqlite.connect(self.db_path) as db:
+    async def list_shopping(
+        self, *, chat_id: int, user_id: int, archived: bool
+    ) -> List[ShoppingItem]:
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT id, chat_id, user_id, text, created_utc, archived FROM shopping WHERE chat_id=? AND user_id=? AND archived=? ORDER BY id DESC",
+                """
+                SELECT * FROM shopping
+                WHERE chat_id = ? AND user_id = ? AND archived = ?
+                ORDER BY id DESC
+                """,
                 (chat_id, user_id, 1 if archived else 0),
-            ) as cur:
-                async for row in cur:
-                    out.append(
-                        ShoppingItem(
-                            id=row[0],
-                            chat_id=row[1],
-                            user_id=row[2],
-                            text=row[3],
-                            created_utc=datetime.fromisoformat(row[4]).replace(tzinfo=UTC),
-                            archived=row[5],
-                        )
-                    )
-        return out
+            ) as cursor:
+                rows = await cursor.fetchall()
+        return [
+            ShoppingItem(
+                id=row["id"],
+                chat_id=row["chat_id"],
+                user_id=row["user_id"],
+                text=row["text"],
+                created_utc=datetime.fromisoformat(row["created_utc"]).replace(tzinfo=UTC),
+                archived=bool(row["archived"]),
+            )
+            for row in rows
+        ]
 
-    async def archive_shopping(self, item_id: int) -> None:
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("UPDATE shopping SET archived=1 WHERE id=?", (item_id,))
+    async def archive_shopping_item(self, item_id: int) -> None:
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute("UPDATE shopping SET archived = 1 WHERE id = ?", (item_id,))
             await db.commit()
 
-    async def delete_shopping(self, item_id: int) -> None:
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("DELETE FROM shopping WHERE id=?", (item_id,))
+    async def delete_shopping_item(self, item_id: int) -> None:
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute("DELETE FROM shopping WHERE id = ?", (item_id,))
             await db.commit()
 
-    # -------- rituals
-    async def create_ritual(self, chat_id: int, user_id: int, text: str, created_utc: datetime) -> Ritual:
-        async with aiosqlite.connect(self.db_path) as db:
+    # --- rituals ------------------------------------------------------------------
+
+    async def create_ritual(
+        self, *, chat_id: int, user_id: int, text: str, created_utc: datetime
+    ) -> Ritual:
+        async with aiosqlite.connect(self._db_path) as db:
             cur = await db.execute(
-                "INSERT INTO rituals(chat_id,user_id,text,created_utc) VALUES(?,?,?,?)",
+                """
+                INSERT INTO rituals (chat_id, user_id, text, created_utc)
+                VALUES (?, ?, ?, ?)
+                """,
                 (chat_id, user_id, text, created_utc.isoformat()),
             )
-            r_id = cur.lastrowid
-            await cur.close()
             await db.commit()
-        return Ritual(id=r_id, chat_id=chat_id, user_id=user_id, text=text, created_utc=created_utc)
+            ritual_id = cur.lastrowid
+            await cur.close()
+        return Ritual(
+            id=ritual_id,
+            chat_id=chat_id,
+            user_id=user_id,
+            text=text,
+            created_utc=created_utc,
+        )
 
-    async def list_rituals(self, chat_id: int, user_id: int) -> List[Ritual]:
-        out: List[Ritual] = []
-        async with aiosqlite.connect(self.db_path) as db:
+    async def list_rituals(self, *, chat_id: int, user_id: int, limit: int = 100) -> List[Ritual]:
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT id, chat_id, user_id, text, created_utc FROM rituals WHERE chat_id=? AND user_id=? ORDER BY id DESC",
-                (chat_id, user_id),
-            ) as cur:
-                async for row in cur:
-                    out.append(
-                        Ritual(
-                            id=row[0],
-                            chat_id=row[1],
-                            user_id=row[2],
-                            text=row[3],
-                            created_utc=datetime.fromisoformat(row[4]).replace(tzinfo=UTC),
-                        )
-                    )
-        return out
+                """
+                SELECT * FROM rituals
+                WHERE chat_id = ? AND user_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (chat_id, user_id, limit),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        return [
+            Ritual(
+                id=row["id"],
+                chat_id=row["chat_id"],
+                user_id=row["user_id"],
+                text=row["text"],
+                created_utc=datetime.fromisoformat(row["created_utc"]).replace(tzinfo=UTC),
+            )
+            for row in rows
+        ]
 
+    async def delete_ritual(self, ritual_id: int) -> None:
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute("DELETE FROM rituals WHERE id = ?", (ritual_id,))
+            await db.commit()
+
+
+__all__ = [
+    "Alert",
+    "DBManager",
+    "Reminder",
+    "Ritual",
+    "ShoppingItem",
+    "Task",
+    "UTC",
+]

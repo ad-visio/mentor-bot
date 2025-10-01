@@ -8,16 +8,21 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout repo
         uses: actions/checkout@v3
 
-      - name: Deploy to server
+      - name: Deploy via SSH
         uses: appleboy/ssh-action@v0.1.6
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
+            set -e
             cd ${{ secrets.DEPLOY_PATH }}
-            git pull origin main
+            git fetch --all
+            git reset --hard origin/main
+            if [ -f venv/bin/pip ]; then
+              venv/bin/pip install -r requirements.txt
+            fi
             sudo systemctl restart mentor-bot

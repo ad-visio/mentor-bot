@@ -1,0 +1,13 @@
+[Unit]
+Description=ChatGPT Mentor Telegram Bot
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/chatgpt_mentor
+EnvironmentFile=/opt/chatgpt_mentor/.env
+ExecStart=/usr/bin/python3 /opt/chatgpt_mentor/bot.py
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

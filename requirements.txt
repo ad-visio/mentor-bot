@@ -1,9 +1,4 @@
-uirements.txt
-+4
--1
-
-python-telegram-bot==20.3
 aiogram==3.8.0
-apscheduler==3.11.0
-aiosqlite==0.19.0
-python-dotenv==1.0.1
+APScheduler==3.11.0
+aiosqlite>=0.20.0
+python-dotenv>=1.0.0

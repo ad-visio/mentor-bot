@@ -29,6 +29,13 @@ jobs:
 
       - name: Log deployed version
         run: |
-          VERSION=$(cat VERSION 2>/dev/null || echo unknown)
-          COMMIT=$(git rev-parse --short HEAD || echo no-git)
+          VERSION=$(cat VERSION 2>/dev/null | tr -d ' \t\n\r')
+          if [ -z "$VERSION" ]; then
+            VERSION=unknown
+          fi
+          if git rev-parse --short HEAD >/dev/null 2>&1; then
+            COMMIT=$(git rev-parse --short HEAD)
+          else
+            COMMIT=unknown
+          fi
           echo "Mentor Bot v${VERSION} (commit ${COMMIT})"

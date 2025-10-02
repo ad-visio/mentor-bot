@@ -15,7 +15,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BotCommand, CallbackQuery, Message
 from zoneinfo import ZoneInfo
 
 try:
@@ -61,16 +61,13 @@ from storage import (
     Reminder,
     UTC,
 )
-from versioning import build_version_banner, detect_short_commit, read_version_file
+from meta import get_version_line
+from routers.version import version_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_VERSION = read_version_file(BASE_DIR / "VERSION")
-APP_COMMIT = detect_short_commit(BASE_DIR)
-APP_VERSION_RESPONSE: str = ""
-APP_STARTED_AT: datetime | None = None
 DB_PATH = BASE_DIR / "data" / "mentor.db"
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 MAX_PLAN_ITEMS = 3
@@ -246,17 +243,6 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     await reset_state(state)
     await ensure_user_registered(message.chat.id, message.from_user.id)
     await show_main_menu(message)
-
-
-@router.message(Command("version"))
-async def cmd_version(message: Message) -> None:
-    if APP_VERSION_RESPONSE:
-        await message.answer(APP_VERSION_RESPONSE)
-        return
-    banner = build_version_banner(APP_VERSION, APP_COMMIT)
-    if APP_STARTED_AT is not None:
-        banner = f"{banner}\nЗапуск: {APP_STARTED_AT.isoformat()}"
-    await message.answer(banner)
 
 
 @router.message(Command("review_now"))
@@ -970,13 +956,8 @@ async def show_report(message: Message) -> None:
 
 
 async def main() -> None:
-    global APP_VERSION_RESPONSE, APP_STARTED_AT
-
     await db_manager.init()
-    APP_STARTED_AT = datetime.now(tz=UTC)
-    version_banner = build_version_banner(APP_VERSION, APP_COMMIT)
-    logger.info(version_banner)
-    APP_VERSION_RESPONSE = f"{version_banner}\nЗапуск: {APP_STARTED_AT.isoformat()}"
+    logger.info(get_version_line())
 
     bot_token = os.environ.get("BOT_TOKEN")
     if not bot_token:
@@ -985,6 +966,13 @@ async def main() -> None:
     global scheduler
     scheduler = SchedulerManager(db_manager, bot)
     dp = Dispatcher(storage=MemoryStorage())
+    await bot.set_my_commands(
+        [
+            BotCommand(command="start", description="Главное меню"),
+            BotCommand(command="version", description="Показать версию бота"),
+        ]
+    )
+    dp.include_router(version_router)
     dp.include_router(router)
 
     async def on_startup() -> None:

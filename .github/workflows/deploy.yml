@@ -26,3 +26,10 @@ jobs:
               venv/bin/pip install -r requirements.txt
             fi
             sudo systemctl restart mentor-bot
+
+      - name: Log deployed version
+        run: |
+          VERSION=$(cat VERSION)
+          COMMIT=$(git rev-parse --short HEAD || echo unknown)
+          STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          echo "Mentor Bot v${VERSION} (commit ${COMMIT}, started ${STARTED})"

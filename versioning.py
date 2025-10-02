@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
+
+
+logger = logging.getLogger(__name__)
 
 
 def read_version_file(path: Path) -> str:
     try:
         value = path.read_text(encoding="utf-8").strip()
     except FileNotFoundError:
+        logger.warning("VERSION file is missing; falling back to 'unknown'")
         return "unknown"
     return value or "unknown"
 

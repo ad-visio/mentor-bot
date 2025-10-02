@@ -1,9 +1,22 @@
-from datetime import datetime, timezone
+from pathlib import Path
 
-from versioning import build_version_banner
+from versioning import build_version_banner, read_version_file
 
 
 def test_build_version_banner_formats_values() -> None:
-    started = datetime(2024, 5, 1, 7, 30, tzinfo=timezone.utc)
-    banner = build_version_banner("1.2.3", "abc123", started_at=started)
-    assert banner == "Mentor Bot v1.2.3 (commit abc123, started 2024-05-01T07:30:00+00:00)"
+    banner = build_version_banner("1.2.3", "abc123", "2024-05-01")
+    assert banner == "MentorBot v1.2.3 (abc123, 2024-05-01)"
+
+
+def test_read_version_file_missing(tmp_path: Path) -> None:
+    path = tmp_path / "VERSION"
+    assert read_version_file(path) == "unknown"
+
+
+def test_read_version_file_present(tmp_path: Path) -> None:
+    path = tmp_path / "VERSION"
+    path.write_text("1.0.0", encoding="utf-8")
+    assert read_version_file(path) == "1.0.0"
+
+    path.write_text("\n1.2.3\n", encoding="utf-8")
+    assert read_version_file(path) == "1.2.3"

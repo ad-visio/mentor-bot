@@ -31,5 +31,5 @@ jobs:
         run: |
           VERSION=$(cat VERSION)
           COMMIT=$(git rev-parse --short HEAD || echo unknown)
-          STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          echo "Mentor Bot v${VERSION} (commit ${COMMIT}, started ${STARTED})"
+          COMMIT_DATE=$(git show -s --format=%cs HEAD || echo unknown)
+          echo "MentorBot v${VERSION} (${COMMIT}, ${COMMIT_DATE})"

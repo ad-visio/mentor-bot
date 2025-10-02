@@ -61,7 +61,12 @@ from storage import (
     Reminder,
     UTC,
 )
-from versioning import build_version_banner, detect_short_commit, read_version_file
+from versioning import (
+    build_version_banner,
+    detect_commit_date,
+    detect_short_commit,
+    read_version_file,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -69,7 +74,9 @@ logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parent
 APP_VERSION = read_version_file(BASE_DIR / "VERSION")
 APP_COMMIT = detect_short_commit(BASE_DIR)
-APP_START_BANNER: str = ""
+APP_COMMIT_DATE = detect_commit_date(BASE_DIR)
+APP_VERSION_RESPONSE: str = ""
+APP_STARTED_AT: datetime | None = None
 DB_PATH = BASE_DIR / "data" / "mentor.db"
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 MAX_PLAN_ITEMS = 3
@@ -249,7 +256,12 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
 
 @router.message(Command("version"))
 async def cmd_version(message: Message) -> None:
-    banner = APP_START_BANNER or build_version_banner(APP_VERSION, APP_COMMIT)
+    if APP_VERSION_RESPONSE:
+        await message.answer(APP_VERSION_RESPONSE)
+        return
+    banner = build_version_banner(APP_VERSION, APP_COMMIT, APP_COMMIT_DATE)
+    if APP_STARTED_AT is not None:
+        banner = f"{banner}\nЗапуск: {APP_STARTED_AT.isoformat()}"
     await message.answer(banner)
 
 
@@ -964,16 +976,17 @@ async def show_report(message: Message) -> None:
 
 
 async def main() -> None:
-    global APP_START_BANNER
+    global APP_VERSION_RESPONSE, APP_STARTED_AT
 
     await db_manager.init()
-    start_ts = datetime.now(tz=UTC)
-    APP_START_BANNER = build_version_banner(
+    APP_STARTED_AT = datetime.now(tz=UTC)
+    version_banner = build_version_banner(
         APP_VERSION,
         APP_COMMIT,
-        started_at=start_ts,
+        APP_COMMIT_DATE,
     )
-    logger.info(APP_START_BANNER)
+    logger.info(version_banner)
+    APP_VERSION_RESPONSE = f"{version_banner}\nЗапуск: {APP_STARTED_AT.isoformat()}"
 
     bot_token = os.environ.get("BOT_TOKEN")
     if not bot_token:

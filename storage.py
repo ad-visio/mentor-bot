@@ -93,7 +93,7 @@ class DBManager:
             CREATE TABLE IF NOT EXISTS alerts (
                 id INTEGER PRIMARY KEY,
                 reminder_id INTEGER NOT NULL REFERENCES reminders(id) ON DELETE CASCADE,
-                fire_ts_utc TEXT NOT NULL,
+                fire_ts_utc INTEGER NOT NULL,
                 fired INTEGER NOT NULL DEFAULT 0
             );
 
@@ -125,8 +125,6 @@ class DBManager:
             """
         )
 
-        changes: List[str] = []
-
         column_cache: dict[str, List[str]] = {}
 
         async def get_columns(table: str) -> List[str]:
@@ -141,56 +139,19 @@ class DBManager:
             if column in columns:
                 return False
             await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-            changes.append(f"added {table}.{column}")
             column_cache.pop(table, None)
             return True
 
-        await ensure_column("reminders", "archived", "INTEGER NOT NULL DEFAULT 0")
+        migration_applied = await ensure_column("alerts", "fire_ts_utc", "INTEGER")
 
-        await ensure_column("alerts", "fire_ts_utc", "TEXT")
-        alerts_columns = await get_columns("alerts")
-
-        updated_from_ts = 0
-        if "fire_ts_utc" in alerts_columns:
-            if "ts_utc" in alerts_columns:
-                cursor = await db.execute(
-                    """
-                    UPDATE alerts
-                    SET fire_ts_utc = ts_utc
-                    WHERE fire_ts_utc IS NULL AND ts_utc IS NOT NULL
-                    """
-                )
-                updated_from_ts = cursor.rowcount
-                await cursor.close()
-                if updated_from_ts:
-                    changes.append(
-                        f"backfilled alerts.fire_ts_utc from ts_utc={updated_from_ts}"
-                    )
-
-            cursor = await db.execute(
-                """
-                UPDATE alerts
-                SET fire_ts_utc = (
-                    SELECT event_ts_utc FROM reminders WHERE reminders.id = alerts.reminder_id
-                )
-                WHERE fire_ts_utc IS NULL
-                """
-            )
-            updated_from_reminders = cursor.rowcount
-            await cursor.close()
-            if updated_from_reminders:
-                changes.append(
-                    f"backfilled alerts.fire_ts_utc from reminders={updated_from_reminders}"
-                )
-
+        # Keep other schema elements in sync for existing installations.
         await ensure_column("alerts", "fired", "INTEGER NOT NULL DEFAULT 0")
+        await ensure_column("reminders", "archived", "INTEGER NOT NULL DEFAULT 0")
         await ensure_column("tasks", "archived", "INTEGER NOT NULL DEFAULT 0")
         await ensure_column("shopping", "archived", "INTEGER NOT NULL DEFAULT 0")
 
-        if changes:
-            logger.info("DB migrate: %s", "; ".join(changes))
-        else:
-            logger.info("DB migrate: no schema changes required")
+        if migration_applied:
+            logger.info("applied sqlite migration: add alerts.fire_ts_utc")
 
     # --- helpers -----------------------------------------------------------------
 

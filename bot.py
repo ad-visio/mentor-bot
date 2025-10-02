@@ -61,12 +61,7 @@ from storage import (
     Reminder,
     UTC,
 )
-from versioning import (
-    build_version_banner,
-    detect_commit_date,
-    detect_short_commit,
-    read_version_file,
-)
+from versioning import build_version_banner, detect_short_commit, read_version_file
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -74,7 +69,6 @@ logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parent
 APP_VERSION = read_version_file(BASE_DIR / "VERSION")
 APP_COMMIT = detect_short_commit(BASE_DIR)
-APP_COMMIT_DATE = detect_commit_date(BASE_DIR)
 APP_VERSION_RESPONSE: str = ""
 APP_STARTED_AT: datetime | None = None
 DB_PATH = BASE_DIR / "data" / "mentor.db"
@@ -259,7 +253,7 @@ async def cmd_version(message: Message) -> None:
     if APP_VERSION_RESPONSE:
         await message.answer(APP_VERSION_RESPONSE)
         return
-    banner = build_version_banner(APP_VERSION, APP_COMMIT, APP_COMMIT_DATE)
+    banner = build_version_banner(APP_VERSION, APP_COMMIT)
     if APP_STARTED_AT is not None:
         banner = f"{banner}\nЗапуск: {APP_STARTED_AT.isoformat()}"
     await message.answer(banner)
@@ -980,11 +974,7 @@ async def main() -> None:
 
     await db_manager.init()
     APP_STARTED_AT = datetime.now(tz=UTC)
-    version_banner = build_version_banner(
-        APP_VERSION,
-        APP_COMMIT,
-        APP_COMMIT_DATE,
-    )
+    version_banner = build_version_banner(APP_VERSION, APP_COMMIT)
     logger.info(version_banner)
     APP_VERSION_RESPONSE = f"{version_banner}\nЗапуск: {APP_STARTED_AT.isoformat()}"
 

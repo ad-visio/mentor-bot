@@ -29,7 +29,6 @@ jobs:
 
       - name: Log deployed version
         run: |
-          VERSION=$(cat VERSION)
-          COMMIT=$(git rev-parse --short HEAD || echo unknown)
-          COMMIT_DATE=$(git show -s --format=%cs HEAD || echo unknown)
-          echo "MentorBot v${VERSION} (${COMMIT}, ${COMMIT_DATE})"
+          VERSION=$(cat VERSION 2>/dev/null || echo unknown)
+          COMMIT=$(git rev-parse --short HEAD || echo no-git)
+          echo "Mentor Bot v${VERSION} (commit ${COMMIT})"

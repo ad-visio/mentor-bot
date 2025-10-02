@@ -28,33 +28,16 @@ def detect_short_commit(repo_path: Path) -> str:
             text=True,
         )
     except (FileNotFoundError, subprocess.SubprocessError, OSError):
-        return "unknown"
+        return "no-git"
     sha = result.stdout.strip()
-    return sha or "unknown"
+    return sha or "no-git"
 
 
-def detect_commit_date(repo_path: Path) -> str:
-    try:
-        result = subprocess.run(
-            ["git", "show", "-s", "--format=%cs", "HEAD"],
-            cwd=repo_path,
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-    except (FileNotFoundError, subprocess.SubprocessError, OSError):
-        return "unknown"
-    commit_date = result.stdout.strip()
-    return commit_date or "unknown"
-
-
-def build_version_banner(version: str, commit: str, commit_date: str) -> str:
-    return f"MentorBot v{version} ({commit}, {commit_date})"
+def build_version_banner(version: str, commit: str) -> str:
+    return f"Mentor Bot v{version} (commit {commit})"
 
 
 def load_version_banner(base_dir: Path) -> str:
     version = read_version_file(base_dir / "VERSION")
     commit = detect_short_commit(base_dir)
-    commit_date = detect_commit_date(base_dir)
-    return build_version_banner(version, commit, commit_date)
+    return build_version_banner(version, commit)

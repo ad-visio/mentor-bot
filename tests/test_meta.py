@@ -7,6 +7,13 @@ import pytest
 import meta
 
 
+@pytest.fixture(autouse=True)
+def reset_meta_cache():
+    meta._reset_cache_for_tests()
+    yield
+    meta._reset_cache_for_tests()
+
+
 def test_get_version_line_formats_values(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(meta, "get_version", lambda: "1.2.3")
     monkeypatch.setattr(meta, "get_short_sha", lambda: "abc123")
@@ -38,4 +45,13 @@ def test_get_short_sha_handles_errors(monkeypatch: pytest.MonkeyPatch) -> None:
         raise FileNotFoundError
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    assert meta.get_short_sha() == "unknown"
+
+
+def test_get_short_sha_handles_non_zero_return(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeResult:
+        returncode = 1
+        stdout = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: FakeResult())
     assert meta.get_short_sha() == "unknown"

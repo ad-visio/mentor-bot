@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
@@ -9,6 +10,10 @@ import aiosqlite
 from zoneinfo import ZoneInfo
 
 UTC = ZoneInfo("UTC")
+logger = logging.getLogger(__name__)
+
+
+# --- dataclasses ----------------------------------------------------------------
 
 
 @dataclass(slots=True)
@@ -56,7 +61,92 @@ class Ritual:
     chat_id: int
     user_id: int
     text: str
+    preset_key: Optional[str]
     created_utc: datetime
+
+
+@dataclass(slots=True)
+class DailyPlanItem:
+    id: int
+    chat_id: int
+    user_id: int
+    date_ymd: str
+    item: str
+    done: bool
+    done_ts_utc: Optional[datetime]
+
+
+@dataclass(slots=True)
+class DailyReview:
+    id: int
+    chat_id: int
+    user_id: int
+    date_ymd: str
+    mit_done: str
+    mood: int
+    gratitude: str
+    notes: str
+    created_ts_utc: datetime
+
+
+@dataclass(slots=True)
+class Note:
+    id: int
+    chat_id: int
+    user_id: int
+    text: str
+    created_ts_utc: datetime
+
+
+@dataclass(slots=True)
+class KnownUser:
+    chat_id: int
+    user_id: int
+    timezone: ZoneInfo
+
+
+# --- helpers --------------------------------------------------------------------
+
+
+def _ensure_tz(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def _to_iso(dt: datetime) -> str:
+    return _ensure_tz(dt).isoformat()
+
+
+def _to_epoch(dt: datetime) -> int:
+    return int(_ensure_tz(dt).timestamp())
+
+
+def _from_storage_timestamp(value: object) -> datetime:
+    if value is None:
+        raise ValueError("timestamp value is None")
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(int(value), tz=UTC)
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            raise ValueError("empty timestamp value")
+        if text.isdigit() or (text.startswith("-") and text[1:].isdigit()):
+            return datetime.fromtimestamp(int(text), tz=UTC)
+        try:
+            return datetime.fromisoformat(text).replace(tzinfo=UTC)
+        except ValueError:
+            pass
+        try:
+            return datetime.fromtimestamp(int(float(text)), tz=UTC)
+        except ValueError as exc:  # pragma: no cover - defensive
+            raise ValueError(f"Cannot parse timestamp value: {value!r}") from exc
+    raise TypeError(f"Unsupported timestamp type: {type(value)!r}")
+
+
+# --- database manager -----------------------------------------------------------
 
 
 class DBManager:
@@ -117,8 +207,31 @@ class DBManager:
                     created_utc TEXT NOT NULL
                 );
                 """
+                INSERT OR IGNORE INTO user_profiles (chat_id, user_id, timezone)
+                VALUES (?, ?, 'Europe/Kyiv')
+                """,
+                (chat_id, user_id),
             )
             await db.commit()
+            inserted = cur.rowcount > 0
+            await cur.close()
+        return inserted
+
+    async def get_known_users(self) -> List[KnownUser]:
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM user_profiles") as cursor:
+                rows = await cursor.fetchall()
+        result: List[KnownUser] = []
+        for row in rows:
+            try:
+                tz = ZoneInfo(row["timezone"])
+            except Exception:  # pragma: no cover - fallback
+                tz = ZoneInfo("Europe/Kyiv")
+            result.append(KnownUser(chat_id=row["chat_id"], user_id=row["user_id"], timezone=tz))
+        return result
+
+    # --- reminders ----------------------------------------------------------------
 
     # --- helpers -----------------------------------------------------------------
 
@@ -162,7 +275,7 @@ class DBManager:
                 INSERT INTO reminders (chat_id, user_id, text, event_ts_utc, created_utc)
                 VALUES (?, ?, ?, ?, ?)
                 """,
-                (chat_id, user_id, text, event_ts_utc.isoformat(), created_utc.isoformat()),
+                (chat_id, user_id, text, _to_iso(event_ts_utc), _to_iso(created_utc)),
             )
             reminder_id = cur.lastrowid
             await cur.close()
@@ -486,6 +599,19 @@ class DBManager:
         async with aiosqlite.connect(self._db_path) as db:
             await db.execute("DELETE FROM shopping WHERE id = ?", (item_id,))
             await db.commit()
+        return DailyReview(
+            id=0,
+            chat_id=chat_id,
+            user_id=user_id,
+            date_ymd=date_ymd,
+            mit_done=mit_done,
+            mood=mood,
+            gratitude=gratitude,
+            notes=notes,
+            created_ts_utc=_ensure_tz(created_ts_utc),
+        )
+
+    # --- notes --------------------------------------------------------------------
 
     # --- rituals ------------------------------------------------------------------
 

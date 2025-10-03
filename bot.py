@@ -11,7 +11,7 @@ from typing import Iterable, Optional, Sequence
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -24,10 +24,15 @@ from keyboards import (
     ALERT_OPTIONS,
     CalendarMonth,
     alerts_keyboard,
+    cancel_keyboard,
     calendar_keyboard,
+    daily_plan_items_keyboard,
+    daily_plan_menu_keyboard,
     hours_keyboard,
     main_menu_keyboard,
     minutes_keyboard,
+    notes_list_keyboard,
+    notes_menu_keyboard,
     reminder_actions_keyboard,
     reminder_date_choice_keyboard,
     reminders_menu_keyboard,
@@ -81,6 +86,44 @@ class ReminderDraft:
         return local_dt.astimezone(UTC)
 
 
+@dataclass(slots=True)
+class RitualPreset:
+    key: str
+    title: str
+    steps: str
+    summary: str
+    hour: int
+    minute: int
+
+
+RITUAL_PRESETS: dict[str, RitualPreset] = {
+    "sunrise_focus": RitualPreset(
+        key="sunrise_focus",
+        title="Утренний фокус",
+        steps="Дыхание 4×4×4 → журнал благодарностей (3 пункта) → первый шаг к цели",
+        summary="20 минут, заряд энергии и ясность",
+        hour=7,
+        minute=0,
+    ),
+    "midday_reset": RitualPreset(
+        key="midday_reset",
+        title="Полуденный ресет",
+        steps="10 глубоких вдохов → проверка MIT → короткая запись итога",
+        summary="5 минут, помогает перезагрузиться",
+        hour=13,
+        minute=0,
+    ),
+    "evening_anchor": RitualPreset(
+        key="evening_anchor",
+        title="Вечерний якорь",
+        steps="Тёплая музыка → 3 благодарности → визуализация успеха",
+        summary="10 минут, снижает стресс и улучшает сон",
+        hour=21,
+        minute=30,
+    ),
+}
+
+
 class ReminderCreation(StatesGroup):
     choosing_date = State()
     choosing_custom_date = State()
@@ -90,10 +133,28 @@ class ReminderCreation(StatesGroup):
     entering_text = State()
 
 
-class SimpleTextState(StatesGroup):
-    awaiting_task_text = State()
-    awaiting_ritual_text = State()
-    awaiting_shopping_text = State()
+class TaskCreation(StatesGroup):
+    entering_text = State()
+
+
+class ShoppingCreation(StatesGroup):
+    entering_text = State()
+
+
+class DailyPlanStates(StatesGroup):
+    entering_item = State()
+
+
+class NoteStates(StatesGroup):
+    entering_text = State()
+
+
+class DailyReviewStates(StatesGroup):
+    choosing_mit = State()
+    choosing_mood = State()
+    entering_gratitude = State()
+    entering_notes = State()
+    confirming = State()
 
 
 router = Router()
@@ -121,7 +182,7 @@ RITUAL_PRESETS: Sequence[tuple[str, str, str]] = (
 
 async def show_main_menu(message: Message) -> None:
     await message.answer(
-        "Привет! Я твой бот-наставник. Выбери раздел 👇",
+        "Привет! Я твой бот-наставник. Чем займёмся?",
         reply_markup=main_menu_keyboard(),
     )
 
@@ -174,7 +235,15 @@ def shift_month(month: CalendarMonth, delta: int) -> CalendarMonth:
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext) -> None:
     await reset_state(state)
+    await ensure_user_registered(message.chat.id, message.from_user.id)
     await show_main_menu(message)
+
+
+@router.message(Command("review_now"))
+async def cmd_review_now(message: Message, state: FSMContext) -> None:
+    await reset_state(state)
+    await ensure_user_registered(message.chat.id, message.from_user.id)
+    await start_daily_review(message, state, today_local().isoformat())
 
 
 @router.message(F.text == "🏠 На главную")
@@ -224,10 +293,10 @@ async def go_back(message: Message, state: FSMContext) -> None:
         await show_reminders_menu(message)
 
 
-@router.message(F.text == "⏰ Напоминания")
-async def reminders_entry(message: Message, state: FSMContext) -> None:
+@router.message(F.text == "❌ Отмена")
+async def cancel_flow(message: Message, state: FSMContext) -> None:
     await reset_state(state)
-    await show_reminders_menu(message)
+    await message.answer("Отмена. Выберите следующий шаг.", reply_markup=main_menu_keyboard())
 
 
 @router.message(F.text == "ℹ️ Помощь")
@@ -239,13 +308,13 @@ async def help_handler(message: Message) -> None:
 
 
 @router.message(F.text == "➕ Создать")
-async def start_reminder_creation(message: Message, state: FSMContext) -> None:
+async def reminder_create(message: Message, state: FSMContext) -> None:
+    if message.text != "➕ Создать":
+        return
     await state.set_state(ReminderCreation.choosing_date)
-    draft = ReminderDraft()
-    await state.update_data(draft=draft, calendar_month=None)
-    await message.answer("Создаём новое напоминание.", reply_markup=simple_back_keyboard())
+    await state.update_data(reminder=ReminderDraft())
     await message.answer(
-        "Выбери дату для напоминания:",
+        "Когда напомнить?",
         reply_markup=reminder_date_choice_keyboard(),
     )
 
@@ -271,14 +340,10 @@ async def handle_date_choice(callback: CallbackQuery, state: FSMContext) -> None
         await callback.message.answer("Часы:", reply_markup=hours_keyboard())
     elif choice == "calendar":
         await state.set_state(ReminderCreation.choosing_custom_date)
-        month = data.get("calendar_month")
-        if not month:
-            month = CalendarMonth(year=today.year, month=today.month)
-            await state.update_data(calendar_month=month)
         await callback.message.edit_text(
-            "Выбери дату на календаре:",
-            reply_markup=calendar_keyboard(month),
+            "Выберите дату", reply_markup=calendar_keyboard(month)
         )
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("cal:"))
@@ -290,12 +355,8 @@ async def handle_calendar(callback: CallbackQuery, state: FSMContext) -> None:
         return
 
     data = await state.get_data()
-    month: CalendarMonth | None = data.get("calendar_month")
-    if not month:
-        today_local = datetime.now(tz=KYIV_TZ).date()
-        month = CalendarMonth(year=today_local.year, month=today_local.month)
-
-    if action == "prev":
+    month: CalendarMonth = data.get("calendar_month")
+    if callback.data == "cal:prev":
         month = shift_month(month, -1)
         await state.update_data(calendar_month=month)
         await callback.message.edit_reply_markup(reply_markup=calendar_keyboard(month))
@@ -371,7 +432,8 @@ async def handle_alert_choice(callback: CallbackQuery, state: FSMContext) -> Non
     await callback.message.edit_reply_markup(reply_markup=alerts_keyboard(draft.alerts))
 
 
-async def finalize_reminder(message: Message, state: FSMContext, text: str) -> None:
+@router.message(ReminderCreation.entering_text)
+async def reminder_enter_text(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     draft: ReminderDraft = data.get("draft")
     if not draft or not draft.is_complete:
@@ -403,6 +465,10 @@ async def finalize_reminder(message: Message, state: FSMContext, text: str) -> N
         reply_markup=reminder_actions_keyboard(reminder.id),
     )
     await state.clear()
+    await message.answer(
+        "Готово! Напоминание создано.",
+        reply_markup=reminders_menu_keyboard(),
+    )
 
 
 @router.message(ReminderCreation.entering_text, F.text & ~F.text.startswith("/"))
@@ -417,16 +483,25 @@ async def reminder_text_invalid(message: Message) -> None:
 
 async def send_reminder_list(
     message: Message,
-    reminders: Sequence[Reminder],
-    empty_text: str,
+    *,
+    start: Optional[datetime],
+    end: Optional[datetime],
+    archived: bool,
 ) -> None:
+    reminders = await db_manager.get_reminders_for_range(
+        chat_id=message.chat.id,
+        user_id=message.from_user.id,
+        start_utc=start,
+        end_utc=end,
+        archived=archived,
+    )
     if not reminders:
-        await message.answer(empty_text)
+        await message.answer("Ничего не найдено.")
         return
     for reminder in reminders:
         await message.answer(
             format_reminder_card(reminder),
-            reply_markup=reminder_actions_keyboard(reminder.id),
+            reply_markup=None if archived else reminder_actions_keyboard(reminder.id),
         )
 
 
@@ -447,33 +522,16 @@ async def reminders_today(message: Message, state: FSMContext) -> None:
 
 
 @router.message(F.text == "📆 На завтра")
-async def reminders_tomorrow(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    today = datetime.now(tz=KYIV_TZ).date()
-    tomorrow = today + timedelta(days=1)
-    start = datetime.combine(tomorrow, time.min, tzinfo=KYIV_TZ).astimezone(UTC)
-    end = datetime.combine(tomorrow + timedelta(days=1), time.min, tzinfo=KYIV_TZ).astimezone(UTC)
-    reminders = await db_manager.get_reminders_for_range(
-        chat_id=message.chat.id,
-        user_id=message.from_user.id if message.from_user else 0,
-        start_utc=start,
-        end_utc=end,
-        archived=False,
-    )
-    await send_reminder_list(message, reminders, "На завтра планов пока нет.")
+async def reminders_tomorrow(message: Message) -> None:
+    local_today = today_local() + timedelta(days=1)
+    start = datetime.combine(local_today, time(0, 0), tzinfo=KYIV_TZ).astimezone(UTC)
+    end = start + timedelta(days=1)
+    await list_reminders(message, start=start, end=end, archived=False)
 
 
 @router.message(F.text == "📋 Все")
-async def reminders_all(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    reminders = await db_manager.get_reminders_for_range(
-        chat_id=message.chat.id,
-        user_id=message.from_user.id if message.from_user else 0,
-        start_utc=None,
-        end_utc=None,
-        archived=False,
-    )
-    await send_reminder_list(message, reminders, "Активных напоминаний нет.")
+async def reminders_all(message: Message) -> None:
+    await list_reminders(message, start=datetime.now(tz=UTC), end=None, archived=False)
 
 
 @router.message(F.text == "📦 Архив")
@@ -532,16 +590,18 @@ async def tasks_create(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(SimpleTextState.awaiting_task_text, F.text & ~F.text.startswith("/"))
-async def task_received(message: Message, state: FSMContext) -> None:
-    await db_manager.create_task(
+@router.message(TaskCreation.entering_text)
+async def task_text_entered(message: Message, state: FSMContext) -> None:
+    task = await db_manager.create_task(
         chat_id=message.chat.id,
-        user_id=message.from_user.id if message.from_user else 0,
-        text=message.text.strip(),
+        user_id=message.from_user.id,
+        text=message.text,
         created_utc=datetime.now(tz=UTC),
     )
     await state.clear()
-    await message.answer("✅ Задача сохранена.", reply_markup=tasks_menu_keyboard())
+    await message.answer(
+        f"Задача добавлена: {task.text}", reply_markup=tasks_menu_keyboard()
+    )
 
 
 @router.message(SimpleTextState.awaiting_task_text)
@@ -602,6 +662,17 @@ async def task_actions(callback: CallbackQuery) -> None:
 
 # --- rituals -------------------------------------------------------------------
 
+@router.callback_query(F.data.startswith("shop:"))
+async def shopping_actions(callback: CallbackQuery) -> None:
+    _, action, raw_id = callback.data.split(":")
+    item_id = int(raw_id)
+    if action == "done":
+        await db_manager.archive_shopping_item(item_id)
+        await callback.message.edit_text("Перенесено в купленные ✅")
+    elif action == "del":
+        await db_manager.delete_shopping_item(item_id)
+        await callback.message.edit_text("Удалено из списка.")
+    await callback.answer()
 
 @router.message(F.text == "🔁 Ритуалы")
 async def rituals_entry(message: Message, state: FSMContext) -> None:
@@ -617,14 +688,15 @@ async def ritual_add(message: Message, state: FSMContext) -> None:
         reply_markup=simple_back_keyboard(),
     )
 
+# --- rituals -------------------------------------------------------------------
 
-@router.message(SimpleTextState.awaiting_ritual_text, F.text & ~F.text.startswith("/"))
-async def ritual_received(message: Message, state: FSMContext) -> None:
-    await db_manager.create_ritual(
+
+@router.message(F.text == "🧘 Ритуалы")
+async def rituals_menu(message: Message) -> None:
+    await ensure_user_registered(message.chat.id, message.from_user.id)
+    presets_added = await db_manager.list_ritual_presets(
         chat_id=message.chat.id,
-        user_id=message.from_user.id if message.from_user else 0,
-        text=message.text.strip(),
-        created_utc=datetime.now(tz=UTC),
+        user_id=message.from_user.id,
     )
     await state.clear()
     await message.answer("Сохранил!", reply_markup=rituals_menu_keyboard())
@@ -684,21 +756,51 @@ async def shopping_add(message: Message, state: FSMContext) -> None:
     await message.answer("Введи позицию списка покупок.", reply_markup=simple_back_keyboard())
 
 
-@router.message(SimpleTextState.awaiting_shopping_text, F.text & ~F.text.startswith("/"))
-async def shopping_received(message: Message, state: FSMContext) -> None:
-    await db_manager.create_shopping_item(
+
+@router.message(F.text == "✅ Отметить выполнено")
+async def daily_plan_mark(message: Message) -> None:
+    items = await db_manager.list_plan_items(
         chat_id=message.chat.id,
-        user_id=message.from_user.id if message.from_user else 0,
-        text=message.text.strip(),
-        created_utc=datetime.now(tz=UTC),
+        user_id=message.from_user.id,
+        date_ymd=today_local().isoformat(),
+    )
+    pending = [(item.id, item.item[:40]) for item in items if not item.done]
+    await message.answer(
+        "Что готово?",
+        reply_markup=daily_plan_items_keyboard(pending),
+    )
+
+
+@router.callback_query(F.data.startswith("plan:done:"))
+async def daily_plan_done(callback: CallbackQuery) -> None:
+    item_id = int(callback.data.split(":")[2])
+    await db_manager.mark_plan_done(item_id, datetime.now(tz=UTC))
+    await callback.message.edit_text("Отлично! MIT отмечен выполненным.")
+    await callback.answer()
+
+
+# --- notes ---------------------------------------------------------------------
+
+
+@router.message(F.text == "🗒 Заметки")
+async def notes_menu(message: Message, state: FSMContext) -> None:
+    await reset_state(state)
+    await ensure_user_registered(message.chat.id, message.from_user.id)
+    await message.answer("Раздел заметок.", reply_markup=notes_menu_keyboard())
+
+
+@router.message(NoteStates.entering_text)
+async def note_enter(message: Message, state: FSMContext) -> None:
+    await db_manager.add_note(
+        chat_id=message.chat.id,
+        user_id=message.from_user.id,
+        text=message.text,
+        created_ts=datetime.now(tz=UTC),
     )
     await state.clear()
     await message.answer("✅ Добавлено!", reply_markup=shopping_menu_keyboard())
 
 
-@router.message(SimpleTextState.awaiting_shopping_text)
-async def shopping_invalid(message: Message) -> None:
-    await message.answer("Пока принимаю только текст.")
 
 
 @router.message(F.text == "📋 Список покупок")
@@ -758,18 +860,29 @@ async def main() -> None:
     token = os.getenv("BOT_TOKEN")
     if not token:
         raise RuntimeError("BOT_TOKEN is not set")
-    bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    await bot.delete_webhook(drop_pending_updates=True)
-    storage = MemoryStorage()
-    dp = Dispatcher(storage=storage)
+    bot = Bot(token=bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    global scheduler
+    scheduler = SchedulerManager(db_manager, bot)
+    dp = Dispatcher(storage=MemoryStorage())
+    await bot.set_my_commands(
+        [
+            BotCommand(command="start", description="Главное меню"),
+            BotCommand(command="version", description="Показать версию бота"),
+        ]
+    )
+    dp.include_router(version_router)
     dp.include_router(router)
 
-    await db_manager.init()
-    scheduler = SchedulerManager(db_manager, bot)
-    await scheduler.start()
+    async def on_startup() -> None:
+        await scheduler.start()
+        logger.info("Scheduler started")
 
-    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    async def on_shutdown() -> None:
+        if scheduler:
+            await scheduler.shutdown()
+        await bot.session.close()
 
+    await dp.start_polling(bot, on_startup=on_startup, on_shutdown=on_shutdown)
 
 if __name__ == "__main__":
     try:

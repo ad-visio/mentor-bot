@@ -18,6 +18,24 @@ jobs:
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
+            set -e
             cd ${{ secrets.DEPLOY_PATH }}
-            git pull origin main
+            git fetch --all
+            git reset --hard origin/main
+            if [ -f venv/bin/pip ]; then
+              venv/bin/pip install -r requirements.txt
+            fi
             sudo systemctl restart mentor-bot
+
+      - name: Log deployed version
+        run: |
+          VERSION=$(cat VERSION 2>/dev/null | tr -d ' \t\n\r')
+          if [ -z "$VERSION" ]; then
+            VERSION=unknown
+          fi
+          if git rev-parse --short HEAD >/dev/null 2>&1; then
+            COMMIT=$(git rev-parse --short HEAD)
+          else
+            COMMIT=unknown
+          fi
+          echo "Mentor Bot v${VERSION} (commit ${COMMIT})"

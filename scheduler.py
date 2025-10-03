@@ -6,7 +6,6 @@ from typing import Sequence
 
 from aiogram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
 from zoneinfo import ZoneInfo
 
 from keyboards import review_prompt_keyboard
@@ -72,11 +71,31 @@ class SchedulerManager:
 
     async def _schedule_alerts(self) -> None:
         now_utc = datetime.now(tz=UTC)
-        pending = await self._db.get_pending_alerts(now_utc)
-        for alert, reminder in pending:
-            self._add_alert_job(alert, reminder)
+        alerts = await self._db.get_pending_alerts(now_utc)
+        for alert, reminder in alerts:
+            await self._schedule_alert(alert, reminder)
 
-    def _add_alert_job(self, alert: Alert, reminder: Reminder) -> None:
+    async def schedule_alerts(self, alerts: Sequence[Alert]) -> None:
+        for alert in alerts:
+            reminder = await self._db.get_reminder(alert.reminder_id)
+            if reminder is None:
+                continue
+            await self._schedule_alert(alert, reminder)
+
+    async def remove_alerts_for_reminder(self, reminder_id: int) -> None:
+        active_alerts = await self._db.get_active_alerts_for_reminder(reminder_id)
+        for alert in active_alerts:
+            job_id = self._job_id(alert.id)
+            job = self._scheduler.get_job(job_id)
+            if job:
+                job.remove()
+
+    async def _schedule_alert(self, alert: Alert, reminder: Reminder) -> None:
+        if alert.fired:
+            return
+        job_id = self._job_id(alert.id)
+        if self._scheduler.get_job(job_id):
+            return
         run_date = alert.fire_ts_utc.astimezone(UTC)
         if run_date <= datetime.now(tz=UTC):
             return
@@ -94,26 +113,13 @@ class SchedulerManager:
             reminder.id,
             run_date.isoformat(),
         )
-
-    async def _schedule_daily_reviews(self) -> None:
-        users = await self._db.get_known_users()
-        for user in users:
-            trigger = CronTrigger(hour=21, minute=0, timezone=user.timezone)
-            self._scheduler.add_job(
-                self._send_review_prompt,
-                trigger=trigger,
-                args=[user.chat_id, user.user_id, user.timezone.key],
-                id=self._review_job_id(user.chat_id),
-                replace_existing=True,
-            )
+        logger.debug(
+            "Scheduled alert %s for reminder %s at %s", alert.id, reminder.id, run_date
+        )
 
     @staticmethod
     def _job_id(alert_id: int) -> str:
         return f"alert:{alert_id}"
-
-    @staticmethod
-    def _review_job_id(chat_id: int) -> str:
-        return f"review:{chat_id}"
 
     async def _fire_alert(self, alert_id: int) -> None:
         data = await self._db.get_alert_with_reminder(alert_id)
@@ -123,7 +129,7 @@ class SchedulerManager:
         if reminder.archived:
             await self._db.mark_alert_fired(alert.id)
             return
-        local_time = reminder.event_ts_utc.astimezone(KYIV_TZ)
+        local_time = reminder.event_ts_utc.astimezone(KYIV)
         try:
             await self._bot.send_message(
                 chat_id=reminder.chat_id,
